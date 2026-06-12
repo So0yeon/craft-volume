@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo, useSyncExternalStore, useCallback } from "react";
 import * as THREE from "three";
+import { problemPack } from './current-pack/problemPack.js';
 
 /* ════════════════════════════════════════════════════════════════
-   MATH CRAFT — 분수 마을 만들기  (완성본 Phase 1~10)
+   MATH CRAFT — 직육면체의 겉넓이와 부피
    ────────────────────────────────────────────────────────────────
    1. constants        : 블록 카탈로그 / 난이도 / 칭호
-   2. fraction utils   : 분수 계산·표기
-   3. problem generator: 500문제 자동 생성 (8유형 × 5난이도)
+   2. problem utils    : 공통 헬퍼 (ri, pick)
+   3. problem draw     : problemPack에서 문제 뽑기
    4. store & actions  : 경량 Zustand 스타일 스토어 + 건축/보상 로직
    5. achievements     : 업적 정의·검사
    6. persistence      : LocalStorage 자동 저장
@@ -18,17 +19,17 @@ import * as THREE from "three";
 
 /* ═══════════ 1. constants ═══════════ */
 
-const SAVE_KEY = "mathcraft-save-v1";
+const SAVE_KEY = `mathcraft-${problemPack.id}-v1`;
 const WORLD_R = 20;        // 건축 가능 반경 (블록)
 const WORLD_H = 14;        // 최대 높이
 const FILL_LIMIT = 150;    // 한 번에 채우기 최대 블록 수
 
 const TITLES = [
-  { level: 1, name: "분수 새싹", emoji: "🌱" },
-  { level: 3, name: "분수 견습생", emoji: "🍃" },
-  { level: 5, name: "분수 장인", emoji: "🌳" },
-  { level: 8, name: "분수 건축가", emoji: "🏠" },
-  { level: 12, name: "분수 마스터", emoji: "👑" },
+  { level: 1,  name: "부피 새싹",      emoji: "🌱" },
+  { level: 3,  name: "부피 견습생",    emoji: "🍃" },
+  { level: 5,  name: "부피 장인",      emoji: "📐" },
+  { level: 8,  name: "공간 설계자",    emoji: "🏠" },
+  { level: 12, name: "입체도형 마스터", emoji: "👑" },
 ];
 const xpForLevel = (lv) => 40 + (lv - 1) * 30;
 const titleForLevel = (lv) => {
@@ -92,259 +93,23 @@ const BLOCKS = {
 };
 const SHOP_CATS = ["지형", "자재", "지붕·창", "길·조명", "자연", "특수"];
 
-/* ═══════════ 2. fraction utils ═══════════ */
+/* ═══════════ 2. problem utils ═══════════ */
 
-const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1)); // [a,b]
+const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-const lcm = (a, b) => (a / gcd(a, b)) * b;
 
-// 분수는 {w(자연수부), n(분자), d(분모)} 로 표현. 값 = w + n/d
-const frVal = (f) => f.w + f.n / f.d;
-const frToImproper = (f) => ({ n: f.w * f.d + f.n, d: f.d });
-// 문자열 표기: "W N/D" | "N/D" | "W"
-function frStr(f) {
-  if (f.n === 0) return String(f.w);
-  if (f.w === 0) return `${f.n}/${f.d}`;
-  return `${f.w} ${f.n}/${f.d}`;
-}
-function impStr(f) { const i = frToImproper(f); return `${i.n}/${i.d}`; }
-// 가분수 -> 대분수 정규화
-function normalize(nTotal, d) {
-  return { w: Math.floor(nTotal / d), n: nTotal % d, d };
-}
+/* ═══════════ 3. problem draw (problemPack에서 문제를 뽑음) ═══════════ */
 
-/* ═══════════ 3. problem generator (500문제: 난이도별 100문제) ═══════════
-   문제 형태:
-   { kind:'arith'|'compare'|'blank'|'convert'|'word'|'triple',
-     diff, promptParts:[문자열|{fr:'1/4'}...], choices:[str], answer:idx,
-     visA:{w,n,d}|null, visB, op, sig }                                     */
-
-function shuffleWithAnswer(correct, distractors) {
-  const set = [correct];
-  for (const d of distractors) if (!set.includes(d) && set.length < 4) set.push(d);
-  let guard = 0;
-  while (set.length < 4 && guard++ < 30) {
-    const c = `${ri(1, 9)}/${ri(2, 12)}`;
-    if (!set.includes(c)) set.push(c);
-  }
-  for (let i = set.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [set[i], set[j]] = [set[j], set[i]];
-  }
-  return { choices: set, answer: set.indexOf(correct) };
-}
-
-// 덧셈/뺄셈 오답 생성기 (정답의 기약분수/공통분모를 사용)
-function arithDistractors(ans, D) {
-  const t = frToImproper(ans).n;
-  const cands = [];
-  const push = (nT, dd) => { if (nT >= 0) cands.push(frStr(normalize(nT, dd))); };
-  push(t + 1, D); push(t - 1, D); push(t + D, D); push(Math.max(0, t - D), D);
-  if (D > 2) push(t, D - 1);
-  push(t, D + 1);
-  return cands.filter((c) => c !== frStr(ans));
-}
-
-function makeArith(diff, opts = {}) {
-  const d1 = opts.d1 || ri(2, diff === 1 ? 6 : diff >= 4 ? 12 : 10);
-  let d2 = opts.d2 || ri(2, diff === 1 ? 6 : diff >= 4 ? 12 : 10);
-  while (d2 === d1) d2 = ri(2, diff === 1 ? 6 : diff >= 4 ? 12 : 10);
-  const op = opts.op || pick(["+", "-"]);
-  let A, B;
-  if (diff <= 2) { // 진분수끼리
-    let n1 = ri(1, d1 - 1), n2 = ri(1, d2 - 1);
-    A = { w: 0, n: n1, d: d1 }; B = { w: 0, n: n2, d: d2 };
-    // 초등용: 뺄셈일 때 작은 수에서 큰 수를 빼지 않도록 보장
-    if (op === "-" && frVal(A) < frVal(B)) [A, B] = [B, A];
-  } else { // 대분수 포함
-    A = { w: ri(diff >= 4 ? 1 : 0, 3), n: ri(1, d1 - 1), d: d1 };
-    B = { w: ri(0, diff >= 4 ? 2 : 1), n: ri(1, d2 - 1), d: d2 };
-    if (op === "-" && frVal(A) < frVal(B)) [A, B] = [B, A];
-    if (op === "-" && frVal(A) === frVal(B)) A = { ...A, w: A.w + 1 };
-  }
-  const D = lcm(A.d, B.d);
-  const tA = frToImproper(A).n * (D / A.d), tB = frToImproper(B).n * (D / B.d);
-  const ansT = op === "+" ? tA + tB : tA - tB;
-  const ans = normalize(ansT, D);
-  const correct = frStr(ans);
-  const { choices, answer } = shuffleWithAnswer(correct, arithDistractors(ans, D));
-  return {
-    kind: "arith", diff, op,
-    promptParts: [{ fr: frStr(A) }, ` ${op} `, { fr: frStr(B) }, " = ?"],
-    visA: A, visB: B, choices, answer,
-    sig: `a|${frStr(A)}${op}${frStr(B)}`,
-  };
-}
-
-function makeWhole(diff) { // 분수 ± 자연수
-  const d = ri(2, 10);
-  const w = ri(1, 3);
-  const f = { w: ri(0, diff >= 3 ? 2 : 0), n: ri(1, d - 1), d };
-  const op = pick(["+", "-"]);
-  let A, B;
-  if (op === "+") { A = pick([f, { w, n: 0, d: 1 }]); B = A === f ? { w, n: 0, d: 1 } : f; }
-  else { A = { w: f.w + w, n: f.n, d }; B = { w, n: 0, d: 1 }; }
-  const aT = A.d === 1 ? { n: A.w * d, d } : frToImproper(A);
-  const bT = B.d === 1 ? { n: B.w * d, d } : frToImproper(B);
-  const ansT = op === "+" ? aT.n + bT.n : aT.n - bT.n;
-  const ans = normalize(ansT, d);
-  const correct = frStr(ans);
-  const { choices, answer } = shuffleWithAnswer(correct, arithDistractors(ans, d));
-  return {
-    kind: "arith", diff, op,
-    promptParts: [{ fr: frStr(A) }, ` ${op} `, { fr: frStr(B) }, " = ?"],
-    visA: A.d === 1 ? null : A, visB: B.d === 1 ? null : B, choices, answer,
-    sig: `w|${frStr(A)}${op}${frStr(B)}`,
-  };
-}
-
-function makeCompare(diff) {
-  let d1 = ri(2, diff >= 4 ? 12 : 10);
-  let d2 = ri(2, diff >= 4 ? 12 : 10);
-  while (d2 === d1) d2 = ri(2, diff >= 4 ? 12 : 10);
-  let A, B;
-  if (diff <= 2) { A = { w: 0, n: ri(1, d1 - 1), d: d1 }; B = { w: 0, n: ri(1, d2 - 1), d: d2 }; }
-  else { A = { w: ri(0, 2), n: ri(1, d1 - 1), d: d1 }; B = { w: ri(0, 2), n: ri(1, d2 - 1), d: d2 }; }
-  const va = frVal(A), vb = frVal(B);
-  const correct = va > vb ? ">" : va < vb ? "<" : "=";
-  const choices = ["<", "=", ">"];
-  return {
-    kind: "compare", diff,
-    promptParts: [{ fr: frStr(A) }, "  □  ", { fr: frStr(B) }],
-    visA: diff <= 2 ? A : null, visB: diff <= 2 ? B : null,
-    choices, answer: choices.indexOf(correct),
-    sig: `c|${frStr(A)}|${frStr(B)}`,
-  };
-}
-
-function makeBlank(diff) { // A + □ = C  (분모가 다른 항들)
-  const d1 = ri(3, diff >= 4 ? 12 : 9);
-  let d2 = ri(3, diff >= 4 ? 12 : 9);
-  while (d2 === d1) d2 = ri(3, diff >= 4 ? 12 : 9);
-  const op = pick(["+", "-"]);
-  const A = { w: diff >= 4 ? ri(0, 2) : 0, n: ri(1, d1 - 1), d: d1 };
-  const X = { w: diff >= 4 ? ri(0, 1) : 0, n: ri(1, d2 - 1), d: d2 };
-  const D = lcm(A.d, X.d);
-  const tA = frToImproper(A).n * (D / A.d), tX = frToImproper(X).n * (D / X.d);
-  const C = normalize(op === "+" ? tA + tX : Math.abs(tA - tX), D);
-  const realA = op === "-" && tA < tX ? X : A; // 음수 방지
-  const realX = realA === A ? X : A;
-  const correct = frStr(realX);
-  const { choices, answer } = shuffleWithAnswer(correct, arithDistractors(realX, D));
-  return {
-    kind: "blank", diff,
-    promptParts: [{ fr: frStr(realA) }, ` ${op} `, "□", " = ", { fr: frStr(C) }],
-    visA: null, visB: null, choices, answer,
-    sig: `b|${frStr(realA)}${op}${frStr(C)}`,
-  };
-}
-
-function makeConvert(diff) { // 가분수 <-> 대분수
-  const d = ri(2, 9);
-  const w = ri(1, 3), n = ri(1, d - 1);
-  const mixed = { w, n, d };
-  const toMixed = Math.random() < 0.5;
-  const correct = toMixed ? frStr(mixed) : impStr(mixed);
-  const distract = toMixed
-    ? [frStr({ w: w + 1, n, d }), frStr({ w, n: Math.min(d - 1, n + 1), d }), frStr({ w: Math.max(1, w - 1), n, d })]
-    : [`${w * d + n + 1}/${d}`, `${w * d + n - 1}/${d}`, `${w + n}/${d}`];
-  const { choices, answer } = shuffleWithAnswer(correct, distract);
-  return {
-    kind: "convert", diff,
-    promptParts: [{ fr: toMixed ? impStr(mixed) : frStr(mixed) }, toMixed ? " 을(를) 대분수로 나타내면?" : " 을(를) 가분수로 나타내면?"],
-    visA: null, visB: null, choices, answer,
-    sig: `v|${w}|${n}|${d}|${toMixed}`,
-  };
-}
-
-function makeTriple(diff) { // 세 분수 연산 (분모가 서로 다름)
-  const d1 = ri(3, 12); let d2 = ri(3, 12); let d3 = ri(3, 12);
-  while (d2 === d1) d2 = ri(3, 12);
-  while (d3 === d1 || d3 === d2) d3 = ri(3, 12);
-  const a = ri(2, d1 - 1), b = ri(1, d2 - 1), c = ri(1, d3 - 1);
-  const ops = pick([["+", "+"], ["+", "-"], ["-", "+"]]);
-  const D = lcm(lcm(d1, d2), d3);
-  let t = a * (D / d1);
-  t = ops[0] === "+" ? t + b * (D / d2) : t - b * (D / d2);
-  t = ops[1] === "+" ? t + c * (D / d3) : t - c * (D / d3);
-  if (t < 0) return makeTriple(diff);
-  const ans = normalize(t, D);
-  const correct = frStr(ans);
-  const { choices, answer } = shuffleWithAnswer(correct, arithDistractors(ans, D));
-  return {
-    kind: "triple", diff,
-    promptParts: [{ fr: `${a}/${d1}` }, ` ${ops[0]} `, { fr: `${b}/${d2}` }, ` ${ops[1]} `, { fr: `${c}/${d3}` }, " = ?"],
-    visA: null, visB: null, choices, answer,
-    sig: `t|${a}|${b}|${c}|${d1}|${d2}|${d3}|${ops.join("")}`,
-  };
-}
-
-const WORD_TPL = [
-  { t: (a, b) => ["피자를 ", { fr: a }, " 판 먹고, ", { fr: b }, " 판을 더 먹었어요. 모두 몇 판 먹었을까요?"], op: "+" },
-  { t: (a, b) => ["리본 ", { fr: a }, " m 중에서 ", { fr: b }, " m를 잘라 썼어요. 남은 리본은 몇 m일까요?"], op: "-" },
-  { t: (a, b) => ["물병에 물이 ", { fr: a }, " L 있었는데 ", { fr: b }, " L를 더 부었어요. 물은 모두 몇 L일까요?"], op: "+" },
-  { t: (a, b) => ["케이크 ", { fr: a }, " 조각 중 ", { fr: b }, " 조각을 친구에게 주었어요. 남은 케이크는?"], op: "-" },
-  { t: (a, b) => ["우유를 어제 ", { fr: a }, " 컵, 오늘 ", { fr: b }, " 컵 마셨어요. 모두 몇 컵 마셨을까요?"], op: "+" },
-];
-
-function makeWord(diff) {
-  const tpl = pick(WORD_TPL);
-  let d1 = ri(3, 10); let d2 = ri(3, 10);
-  while (d2 === d1) d2 = ri(3, 10);
-  let A = { w: ri(0, 2), n: ri(1, d1 - 1), d: d1 };
-  let B = { w: ri(0, 1), n: ri(1, d2 - 1), d: d2 };
-  if (tpl.op === "-" && frVal(A) <= frVal(B)) A = { ...A, w: B.w + 1 };
-  const D = lcm(A.d, B.d);
-  const tA = frToImproper(A).n * (D / A.d), tB = frToImproper(B).n * (D / B.d);
-  const ans = normalize(tpl.op === "+" ? tA + tB : tA - tB, D);
-  const correct = frStr(ans);
-  const { choices, answer } = shuffleWithAnswer(correct, arithDistractors(ans, D));
-  return {
-    kind: "word", diff, op: tpl.op,
-    promptParts: tpl.t(frStr(A), frStr(B)),
-    visA: A, visB: B, choices, answer,
-    sig: `wd|${frStr(A)}${tpl.op}${frStr(B)}`,
-  };
-}
-
-// 난이도별 유형 분포
-function generateProblem(diff) {
-  const roll = Math.random();
-  if (diff === 1) return makeArith(1);
-  if (diff === 2) return roll < 0.55 ? makeArith(2) : roll < 0.8 ? makeWhole(2) : makeCompare(2);
-  if (diff === 3) return roll < 0.35 ? makeArith(3) : roll < 0.55 ? makeConvert(3) : roll < 0.75 ? makeBlank(3) : makeWhole(3);
-  if (diff === 4) return roll < 0.45 ? makeArith(4) : roll < 0.7 ? makeTriple(4) : roll < 0.88 ? makeBlank(4) : makeCompare(4);
-  return roll < 0.55 ? makeWord(5) : roll < 0.78 ? makeBlank(5) : makeCompare(5);
-}
-
-const PROBLEM_POOL = { 1: [], 2: [], 3: [], 4: [], 5: [] };
-function ensurePool() {
-  for (let diff = 1; diff <= 5; diff++) {
-    if (PROBLEM_POOL[diff].length) continue;
-    const seen = new Set();
-    let guard = 0;
-    while (PROBLEM_POOL[diff].length < 100 && guard++ < 1200) {
-      const p = generateProblem(diff);
-      if (seen.has(p.sig)) continue;
-      seen.add(p.sig);
-      PROBLEM_POOL[diff].push(p);
-    }
-  }
-}
 const recentSigs = [];
 function drawProblem(diff) {
-  ensurePool();
-  const pool = PROBLEM_POOL[diff];
-  for (let i = 0; i < 14; i++) {
-    const p = pool[Math.floor(Math.random() * pool.length)];
-    if (!recentSigs.includes(p.sig)) {
-      recentSigs.push(p.sig);
-      if (recentSigs.length > 25) recentSigs.shift();
-      return p;
-    }
+  let p;
+  for (let i = 0; i < 12; i++) {
+    p = problemPack.generateProblem(diff);
+    if (!recentSigs.includes(p.sig)) break;
   }
-  return pool[Math.floor(Math.random() * pool.length)];
+  recentSigs.push(p.sig);
+  if (recentSigs.length > 20) recentSigs.shift();
+  return p;
 }
 
 /* ═══════════ 4. store & actions ═══════════ */
@@ -575,9 +340,9 @@ const ACHIEVEMENTS = [
   { id: "combo_5", name: "불타오르네!", desc: "5콤보를 달성했어요", emoji: "🔥", check: (s) => s.player.bestCombo >= 5 },
   { id: "solve_100", name: "백문백답", desc: "문제 100개를 풀었어요", emoji: "💯", check: (s) => s.player.solved >= 100 },
   { id: "place_500", name: "건설왕", desc: "블록 500개를 설치했어요", emoji: "🏗️", check: (s) => s.world.placedTotal >= 500 },
-  { id: "coins_1000", name: "부자 분수", desc: "코인 1000개를 모았어요", emoji: "💰", check: (s) => s.player.totalEarned >= 1000 },
-  { id: "architect", name: "분수 건축가", desc: "레벨 8에 도달했어요", emoji: "📐", check: (s) => s.player.level >= 8 },
-  { id: "master", name: "분수 마스터", desc: "레벨 12에 도달했어요", emoji: "👑", check: (s) => s.player.level >= 12 },
+  { id: "coins_1000", name: "황금 건축가", desc: "코인 1000개를 모았어요", emoji: "💰", check: (s) => s.player.totalEarned >= 1000 },
+  { id: "architect", name: "공간 설계자", desc: "레벨 8에 도달했어요", emoji: "📐", check: (s) => s.player.level >= 8 },
+  { id: "master", name: "입체도형 마스터", desc: "레벨 12에 도달했어요", emoji: "👑", check: (s) => s.player.level >= 12 },
 ];
 const ACH_REWARD = 20;
 
@@ -1405,9 +1170,15 @@ function Frac({ str, big }) {
 function PromptText({ parts, big }) {
   return (
     <span>
-      {parts.map((p, i) =>
-        typeof p === "string" ? <span key={i}>{p}</span> : <Frac key={i} str={p.fr} big={big} />
-      )}
+      {parts.map((p, i) => {
+        if (typeof p !== "string") return <Frac key={i} str={p.fr} big={big} />;
+        return p.split('\n').map((line, j, arr) => (
+          <React.Fragment key={`${i}-${j}`}>
+            {line}
+            {j < arr.length - 1 && <br />}
+          </React.Fragment>
+        ));
+      })}
     </span>
   );
 }
@@ -1562,7 +1333,7 @@ function MainMenu({ savedMeta, onContinue, onNew, onSettings }) {
           {title.split("").map((ch, i) => (ch === " " ? <span key={i} style={{ width: 16 }} /> : <BlockLetter key={i} ch={ch} i={i} />))}
         </div>
         <div className="mc-display anim-fadeup text-2xl mb-5 px-5 py-1 rounded-full glass" style={{ animationDelay: ".7s", color: "#7A5230" }}>
-          🧮 분수 마을 만들기 🏡
+          🧮 {problemPack.title} 🏡
         </div>
         <div className="flex flex-col gap-3 items-center anim-fadeup" style={{ animationDelay: ".9s" }}>
           {savedMeta && (
@@ -1820,7 +1591,7 @@ function HelpOverlay({ onClose }) {
   return (
     <Modal onClose={onClose}>
       <h3 className="mc-display text-2xl mb-1 text-center">🏡 마을에 온 걸 환영해요!</h3>
-      <p className="text-center text-sm opacity-75 mb-4">분수 문제를 풀어 코인을 모으고, 나만의 마을을 지어 보세요.</p>
+      <p className="text-center text-sm opacity-75 mb-4">수학 문제를 풀어 코인을 모으고, 나만의 마을을 지어 보세요.</p>
       <div className="flex flex-col gap-1.5 mb-4">
         {rows.map(([e, t, d]) => (
           <div key={t} className="flex items-center gap-3 rounded-2xl px-3 py-2" style={{ background: "rgba(255,255,255,0.6)" }}>
@@ -1961,8 +1732,6 @@ function QuizModal({ onClose, notifyAch }) {
 
         {/* 문제 */}
         <div className="rounded-2xl p-4 mb-3 text-center" style={{ background: "rgba(255,255,255,0.7)" }}>
-          {problem.kind === "blank" && <div className="text-sm opacity-70 mb-1">□에 알맞은 분수는?</div>}
-          {isCompare && <div className="text-sm opacity-70 mb-1">□에 알맞은 기호는?</div>}
           <div className="text-xl sm:text-2xl leading-relaxed">
             <PromptText parts={problem.promptParts} big={problem.kind !== "word"} />
           </div>
@@ -2090,7 +1859,6 @@ function Village({ onMenu, onSettings, showToast, notifyAch }) {
     world.syncBlocks(blocks);
     prevBlocksRef.current = blocks;
     world.start();
-    ensurePool();
 
     const unsub = store.subscribe((s) => {
       const next = s.world.blocks;
