@@ -46,6 +46,8 @@ const DIFFICULTIES = [
   { id: 5, name: "마스터", emoji: "👑", reward: 25, color: "#E0883A" },
 ];
 
+const WRONG_PENALTY = 2;
+
 // kind: cube(정육면체) | slab(낮은 블록) | roof(지붕 프리즘) | deco(장식 모델)
 const BLOCKS = {
   grass:      { name: "잔디",          color: "#7FBF5C", cat: "지형", price: 1, kind: "cube" },
@@ -295,11 +297,12 @@ const actions = {
     let diff = s.quiz.difficulty;
     let downed = false;
     if (wrongStreak >= 2 && diff > 1) { diff -= 1; downed = true; }
+    const penalty = Math.min(s.player.coins, WRONG_PENALTY);
     store.set({
-      player: { ...s.player, combo: 0, solved: s.player.solved + 1 },
+      player: { ...s.player, combo: 0, solved: s.player.solved + 1, coins: s.player.coins - penalty },
       quiz: { difficulty: diff, correctStreak: 0, wrongStreak: downed ? 0 : wrongStreak },
     });
-    return { downed, diff };
+    return { downed, diff, penalty };
   },
 
   setDifficulty(diff) {
@@ -1657,6 +1660,7 @@ function QuizModal({ onClose, notifyAch }) {
   const [eliminated, setEliminated] = useState([]);
   const [offerUp, setOfferUp] = useState(false);
   const [downMsg, setDownMsg] = useState(false);
+  const [loss, setLoss] = useState(null);
   const [session, setSession] = useState({ ok: 0, total: 0 });
   const [hintUsed, setHintUsed] = useState(false);
   const timer = useRef(null);
@@ -1669,7 +1673,7 @@ function QuizModal({ onClose, notifyAch }) {
     clearTimeout(timer.current);
     setProblem(drawProblem(newDiff ?? store.get().quiz.difficulty));
     setPhase("ask"); setPicked(-1); setGain(null);
-    setRevealVis(false); setEliminated([]); setDownMsg(false); setHintUsed(false);
+    setRevealVis(false); setEliminated([]); setDownMsg(false); setHintUsed(false); setLoss(null);
   }, []);
 
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -1693,6 +1697,7 @@ function QuizModal({ onClose, notifyAch }) {
       }
     } else {
       const res = actions.answerWrong();
+      setLoss(res);
       setPhase("wrong");
       audio.play("wrong");
       if (res.downed) setDownMsg(true);
@@ -1715,7 +1720,8 @@ function QuizModal({ onClose, notifyAch }) {
 
   const showAnswer = () => {
     if (phase !== "ask") return;
-    actions.answerWrong();
+    const res = actions.answerWrong();
+    setLoss(res);
     setPicked(problem.answer);
     setPhase("wrong");
     audio.play("wrong");
@@ -1794,6 +1800,9 @@ function QuizModal({ onClose, notifyAch }) {
         {phase === "wrong" && (
           <div className="text-center mb-2">
             <span className="mc-display text-lg" style={{ color: FB.bad }}>아쉬워요! 정답을 확인해 보세요</span>
+            {loss && loss.penalty > 0 && (
+              <div className="mc-display text-lg mt-1" style={{ color: "#C0392B" }}>-{loss.penalty}🪙</div>
+            )}
             {downMsg && <div className="text-sm mt-1 opacity-80">🍀 조금 쉬운 문제로 바꿔 줄게요. 천천히 해도 괜찮아요!</div>}
           </div>
         )}
